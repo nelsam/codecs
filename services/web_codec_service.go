@@ -14,6 +14,60 @@ import (
 	"strings"
 )
 
+// For storing a single type, from the Accept header, split into its various
+// pieces.
+type AcceptType struct {
+	ContentTypes []string
+	Variables    map[string]string
+}
+
+type AcceptPriority struct {
+	Types    []AcceptType
+	Priority float32
+}
+
+// Creates an accept type from the string representation of a single type
+// in an Accept header.
+func NewAcceptType(accept string) AcceptType {
+	acceptType := new(AcceptType)
+
+	typesAndVariables := strings.Split(accept, ";")
+	variables := typesAndVariables[1:]
+	for _, variable := range variables {
+		variableParts := strings.Split(variable, "=")
+		acceptType.Variables[variableParts[0]] = variableParts[1]
+	}
+
+	typesString := typesAndVariables[0]
+	types := strings.Split(typesString, "+")
+	// Don't care about the category
+	categoryEnd := strings.LastIndex(types[0], "/")
+	types[0] = types[0][categoryEnd:]
+	acceptType.ContentTypes = types
+
+	acceptType.priority = 1.0
+	if priority, ok := acceptType.variables["q"]; ok {
+		if requestedPriority, err := strconv.ParseFloat(priority, 32).(float32); err == nil {
+			acceptType.Priority = float32(requestedPriority)
+		}
+	}
+
+	return acceptType
+}
+
+// Creates a map of accept types from a full Accept header string.  Each
+// index in the resulting map is priority level, and the each value is a
+// slice of all types requested at that priority level.
+func ParseAcceptTypes(accept string) map[float32][]AcceptType {
+	acceptPieces := strings.Split(accept, ",")
+	types := make(map[float32][]AcceptType)
+	for _, acceptStr := range acceptPieces {
+		acceptType := NewAcceptType(acceptStr)
+		types[acceptType.Priority] = append(types[acceptType.Priority], acceptType)
+	}
+	return types
+}
+
 // ErrorContentTypeNotSupported is the error for when a content type is requested that is not supported by the system
 var ErrorContentTypeNotSupported = errors.New("Content type is not supported.")
 
