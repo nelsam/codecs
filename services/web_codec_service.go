@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/codecs/jsonp"
 	"github.com/stretchr/codecs/msgpack"
 	"github.com/stretchr/codecs/xml"
+	"strconv"
 	"strings"
 )
 
@@ -19,17 +20,79 @@ import (
 type AcceptType struct {
 	ContentTypes []string
 	Variables    map[string]string
+	Size         int
+	Priority     float32
+	Left         *AcceptType
+	Right        *AcceptType
 }
 
-type AcceptPriority struct {
-	Types    []AcceptType
-	Priority float32
+func (acceptType *AcceptType) Append(next AcceptType) {
+	switch {
+	case acceptType.Priority == next.Priority:
+		if acceptType.Left == nil {
+			acceptType.Left = next
+		} else if acceptType.Right == nil {
+			acceptType.Right = next
+		} else {
+			// Try to keep the tree balanced
+			if acceptType.Right.Size <= acceptType.Left.Size {
+				acceptType.Right.Append(next)
+			} else {
+				acceptType.Left.Append(next)
+			}
+		}
+	case next.Priority > acceptType.Priority:
+		if acceptType.Left == nil {
+			acceptType.Left = next
+		} else {
+			acceptType.Left.Append(next)
+		}
+	case next.Priority < acceptType.Priority:
+		if acceptType.Right == nil {
+			acceptType.Right = next
+		} else {
+			acceptType.Right.Append(next)
+		}
+	}
+	acceptType.Size++
+}
+
+func (acceptType *AcceptType) ToSlice() []AcceptType {
+	typeSlice := make([]AcceptType, acceptType.Size)
+	leftEnd := 0
+	if acceptType.Left != nil {
+		leftEnd = acceptType.Left.Size
+		for index, leftType := range acceptType.Left.ToSlice() {
+			typeSlice[index] = leftType
+		}
+	}
+	typeSlice[leftEnd] = acceptType
+	if acceptType.Right != nil {
+		rightStart := leftEnd + 1
+		for index, rightType := range acceptType.Right.ToSlice() {
+			typeSlice[rightStart + index] = rightType
+		}
+	}
+	return typeSlice
+}
+
+func (acceptType *AcceptType) FindCodec(codecs []codecs.Codec) codecs.Codec {
+	for _, codec := range codecs {
+		for _, typeString := range acceptType.ContentTypes {
+			if strings.ToLower(typeString) == strings.ToLower(codec.ContentType()) {
+				return codec
+			}
+		}
+	}
+	return nil
 }
 
 // Creates an accept type from the string representation of a single type
 // in an Accept header.
 func NewAcceptType(accept string) AcceptType {
 	acceptType := new(AcceptType)
+
+	acceptType.Size = 1
 
 	typesAndVariables := strings.Split(accept, ";")
 	variables := typesAndVariables[1:]
@@ -55,17 +118,20 @@ func NewAcceptType(accept string) AcceptType {
 	return acceptType
 }
 
-// Creates a map of accept types from a full Accept header string.  Each
-// index in the resulting map is priority level, and the each value is a
-// slice of all types requested at that priority level.
-func ParseAcceptTypes(accept string) map[float32][]AcceptType {
+// Creates a binary tree of AcceptTypes.  They will be sorted by priority,
+// with higher priorities on the left.
+func ParseAcceptTypes(accept string) AcceptType {
 	acceptPieces := strings.Split(accept, ",")
-	types := make(map[float32][]AcceptType)
+	var root, nextType AcceptType
 	for _, acceptStr := range acceptPieces {
-		acceptType := NewAcceptType(acceptStr)
-		types[acceptType.Priority] = append(types[acceptType.Priority], acceptType)
+		nextType = NewAcceptType(acceptStr)
+		if root == nil {
+			root = nextType
+		} else {
+			root.Append(nextType)
+		}
 	}
-	return types
+	return root
 }
 
 // ErrorContentTypeNotSupported is the error for when a content type is requested that is not supported by the system
@@ -126,10 +192,16 @@ func (s *WebCodecService) GetCodecForResponding(accept, extension string, hasCal
 		}
 	}
 
-	for _, codec := range s.codecs {
-		if strings.Contains(strings.ToLower(accept), strings.ToLower(codec.ContentType())) {
+	// Prefer the accept header
+	acceptTypesRoot := ParseAcceptTypes(accept)
+	for _, acceptType := range acceptTypesRoot.ToSlice() {
+		if codec := acceptType.FindCodec(s.codecs); codec != nil {
 			return codec, nil
-		} else if strings.ToLower(codec.FileExtension()) == strings.ToLower(extension) {
+		}
+	}
+
+	for _, codec := range s.codecs {
+		if strings.ToLower(codec.FileExtension()) == strings.ToLower(extension) {
 			return codec, nil
 		} else if hasCallback && codec.CanMarshalWithCallback() {
 			return codec, nil
